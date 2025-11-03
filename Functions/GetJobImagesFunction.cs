@@ -13,6 +13,7 @@ using Microsoft.Azure.Functions.Worker;
 using Microsoft.Azure.Functions.Worker.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using WeatherImageApp.Helpers;
 
 namespace WeatherImageApp.Functions
 {
@@ -63,6 +64,7 @@ namespace WeatherImageApp.Functions
             }
 
             var resp = req.CreateResponse(HttpStatusCode.OK);
+            response.AddCors();
             await resp.WriteAsJsonAsync(new
             {
                 jobId,

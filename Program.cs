@@ -1,23 +1,43 @@
+using System.Threading.Tasks;
+using Azure.Data.Tables;
 using Azure.Storage.Blobs;
 using Azure.Storage.Queues;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 
-var host = new HostBuilder()
-    .ConfigureFunctionsWorkerDefaults()
-    .ConfigureServices((ctx, services) =>
+namespace WeatherImageApp
+{
+    public class Program
     {
-        var config = new ConfigurationBuilder()
-            .AddJsonFile("local.settings.json", optional: true, reloadOnChange: true)
-            .AddEnvironmentVariables()
-            .Build();
+        public static async Task Main(string[] args)
+        {
+            var host = new HostBuilder()
+                .ConfigureFunctionsWorkerDefaults()
+                .ConfigureServices((context, services) =>
+                {
+                    var config = context.Configuration;
 
-        var storageConn = config["AzureWebJobsStorage"] ?? "UseDevelopmentStorage=true";
+                    // use your custom one first, fall back to default
+                    var storageConn =
+                        config["Storage:ConnectionString"] ??
+                        config["AzureWebJobsStorage"];
 
-        services.AddSingleton(new BlobServiceClient(storageConn));
-        services.AddSingleton(new QueueServiceClient(storageConn));
-    })
-    .Build();
+                    // tables
+                    services.AddSingleton<TableServiceClient>(_ =>
+                        new TableServiceClient(storageConn));
 
-host.Run();
+                    // blobs
+                    services.AddSingleton<BlobServiceClient>(_ =>
+                        new BlobServiceClient(storageConn));
+
+                    // queues (this is the one your DebugQueuesFunction needs)
+                    services.AddSingleton<QueueServiceClient>(_ =>
+                        new QueueServiceClient(storageConn));
+                })
+                .Build();
+
+            await host.RunAsync();
+        }
+    }
+}

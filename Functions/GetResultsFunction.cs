@@ -4,6 +4,7 @@ using Microsoft.Azure.Functions.Worker.Http;
 using Microsoft.Extensions.Logging;
 using Azure.Storage.Blobs;
 using System.Text.Json;
+using WeatherImageApp.Helpers;
 
 namespace WeatherImageApp.Functions
 {
@@ -30,6 +31,7 @@ namespace WeatherImageApp.Functions
             }
 
             var res = req.CreateResponse(HttpStatusCode.OK);
+            res.AddCors();
             await res.WriteStringAsync(JsonSerializer.Serialize(new { jobId, images = uris }));
             return res;
         }

@@ -4,6 +4,7 @@ using System.Threading.Tasks;
 using Azure.Storage.Queues;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Azure.Functions.Worker.Http;
+using WeatherImageApp.Helpers;
 
 namespace WeatherImageApp.Functions
 {
@@ -24,6 +25,7 @@ namespace WeatherImageApp.Functions
             }
 
             var res = req.CreateResponse(HttpStatusCode.OK);
+            res.AddCors();
             var payload = new
             {
                 weather = await One("weather-jobs"),

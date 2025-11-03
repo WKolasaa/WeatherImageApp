@@ -70,6 +70,7 @@ namespace WeatherImageApp.Functions
             await queueClient.SendMessageAsync(Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(payload)));
 
             var res = req.CreateResponse(HttpStatusCode.OK);
+            res.AddCors();
             await res.WriteAsJsonAsync(new { jobId });
             return res;
         }
