@@ -29,7 +29,6 @@ namespace WeatherImageApp.Functions
         public async Task<HttpResponseData> Run(
             [HttpTrigger(AuthorizationLevel.Anonymous, "post", "get", Route = "jobs/start")] HttpRequestData req)
         {
-            // optional API key
             var expectedApiKey = ConfigHelper.Get("API_KEY");
             if (!string.IsNullOrEmpty(expectedApiKey))
             {

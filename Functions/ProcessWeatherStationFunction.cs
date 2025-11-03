@@ -36,7 +36,7 @@ namespace WeatherImageApp.Functions
             }
 
             string jobId = msg.JobId;
-            _logger.LogInformation("🌦️ Processing weather data for job {JobId}", jobId);
+            _logger.LogInformation("Processing weather data for job {JobId}", jobId);
 
             var buienUrl = ConfigHelper.Get("Api:BuienradarUrl", "https://data.buienradar.nl/2.0/feed/json");
 
@@ -101,7 +101,7 @@ namespace WeatherImageApp.Functions
                 _logger.LogWarning(ex, "Could not update jobstatus for {JobId}", jobId);
             }
 
-            _logger.LogInformation("✅ Queued {Count} stations for job {JobId}", counter, jobId);
+            _logger.LogInformation("Queued {Count} stations for job {JobId}", counter, jobId);
         }
     }
 }

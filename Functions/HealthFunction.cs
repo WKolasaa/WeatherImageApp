@@ -37,15 +37,12 @@ namespace WeatherImageApp.Functions
             var outputContainerName = _config["IMAGE_OUTPUT_CONTAINER"] ?? "output";
             var jobStatusTableName = _config["Storage:JobStatusTableName"] ?? "JobStatus";
 
-            // check blob containers
             var imagesContainer = _blobServiceClient.GetBlobContainerClient(imagesContainerName);
             await imagesContainer.CreateIfNotExistsAsync();
 
             var outputContainer = _blobServiceClient.GetBlobContainerClient(outputContainerName);
             await outputContainer.CreateIfNotExistsAsync();
 
-            // ✅ this was the error — TableClient doesn’t have EnsureExistsAsync
-            // we create the table via TableServiceClient
             var tableClient = _tableServiceClient.GetTableClient(jobStatusTableName);
             await tableClient.CreateIfNotExistsAsync();
 

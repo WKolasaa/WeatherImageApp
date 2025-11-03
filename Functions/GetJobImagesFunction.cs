@@ -1,10 +1,7 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Net;
-using System.Text.Json;
 using System.Threading.Tasks;
-using Azure;
 using Azure.Storage;
 using Azure.Storage.Blobs;
 using Azure.Storage.Blobs.Models;
@@ -41,18 +38,14 @@ namespace WeatherImageApp.Functions
 
             _logger.LogInformation("Listing images for job {JobId} in container {Container}", jobId, containerName);
 
-            // create client (works for real Azure and for Azurite)
             var containerClient = new BlobContainerClient(connString, containerName);
             await containerClient.CreateIfNotExistsAsync(PublicAccessType.None);
 
-            // prefix is usually "jobId/filename.jpg"
             var prefix = $"{jobId}/";
-
             var blobs = new List<object>();
 
             await foreach (var blobItem in containerClient.GetBlobsAsync(prefix: prefix))
             {
-                // build SAS url
                 var sasUrl = BuildBlobSasUrl(containerClient, blobItem.Name, connString, sasExpiryMinutes);
 
                 blobs.Add(new
@@ -64,7 +57,6 @@ namespace WeatherImageApp.Functions
             }
 
             var resp = req.CreateResponse(HttpStatusCode.OK);
-            response.AddCors();
             await resp.WriteAsJsonAsync(new
             {
                 jobId,
@@ -72,6 +64,7 @@ namespace WeatherImageApp.Functions
                 images = blobs
             });
 
+            resp.AddCors();
             return resp;
         }
 
@@ -81,7 +74,6 @@ namespace WeatherImageApp.Functions
             string connectionString,
             int expiryMinutes)
         {
-            // If we have account name/key we can build SAS. We must handle dev storage specially.
             var (accountName, accountKey, blobEndpoint) = ParseStorageInfo(connectionString);
 
             var credential = new StorageSharedKeyCredential(accountName, accountKey);
@@ -90,7 +82,7 @@ namespace WeatherImageApp.Functions
             {
                 BlobContainerName = containerClient.Name,
                 BlobName = blobName,
-                Resource = "b", // blob
+                Resource = "b",
                 ExpiresOn = DateTimeOffset.UtcNow.AddMinutes(expiryMinutes)
             };
 
@@ -98,20 +90,14 @@ namespace WeatherImageApp.Functions
 
             var sas = sasBuilder.ToSasQueryParameters(credential).ToString();
 
-            // blobEndpoint is like http://127.0.0.1:10000/devstoreaccount1
-            // we need to append container + blob
             var uri = new Uri($"{blobEndpoint}/{containerClient.Name}/{blobName}?{sas}");
             return uri.ToString();
         }
 
-        /// <summary>
-        /// Parses either a real Azure Storage connection string or the Azurite shortcut "UseDevelopmentStorage=true".
-        /// </summary>
         private static (string accountName, string accountKey, string blobEndpoint) ParseStorageInfo(string connectionString)
         {
             if (string.Equals(connectionString, "UseDevelopmentStorage=true", StringComparison.OrdinalIgnoreCase))
             {
-                // well-known Azurite/emulator values
                 const string devAccount = "devstoreaccount1";
                 const string devKey =
                     "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==";
@@ -119,7 +105,6 @@ namespace WeatherImageApp.Functions
                 return (devAccount, devKey, devBlobEndpoint);
             }
 
-            // real connection string: split on ;
             var parts = connectionString.Split(';', StringSplitOptions.RemoveEmptyEntries);
             string? accountName = null;
             string? accountKey = null;
@@ -140,7 +125,6 @@ namespace WeatherImageApp.Functions
 
             if (string.IsNullOrEmpty(blobEndpoint))
             {
-                // Fall back to default Azure endpoint
                 blobEndpoint = $"https://{accountName}.blob.core.windows.net";
             }
 

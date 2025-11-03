@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Net;
-using System.Text.Json;
 using System.Threading.Tasks;
 using Azure;
 using Azure.Data.Tables;
@@ -41,15 +40,29 @@ namespace WeatherImageApp.Functions
 
             _logger.LogInformation("Getting status for job {JobId}", jobId);
 
-            // read from table
             var tableClient = new TableClient(connString, tableName);
             await tableClient.CreateIfNotExistsAsync();
 
-            // partition could be e.g. "jobs"
-            var entity = await tableClient.GetEntityAsync<TableEntity>("jobs", jobId);
-            var jobEntity = entity.Value;
+            TableEntity jobEntity;
+            const string partitionKey = "jobs";
 
-            // also count images already present for this job
+            try
+            {
+                var entityResponse = await tableClient.GetEntityAsync<TableEntity>(partitionKey, jobId);
+                jobEntity = entityResponse.Value;
+            }
+            catch (RequestFailedException ex) when (ex.Status == 404)
+            {
+                var notFound = req.CreateResponse(HttpStatusCode.NotFound);
+                await notFound.WriteAsJsonAsync(new
+                {
+                    jobId,
+                    status = "NotFound"
+                });
+                notFound.AddCors();
+                return notFound;
+            }
+
             var blobContainer = new BlobContainerClient(connString, imagesContainer);
             await blobContainer.CreateIfNotExistsAsync();
 
@@ -63,17 +76,17 @@ namespace WeatherImageApp.Functions
             }
 
             var resp = req.CreateResponse(HttpStatusCode.OK);
-            response.AddCors();
+
             await resp.WriteAsJsonAsync(new
             {
                 jobId,
-                status = jobEntity.GetString("Status"),
-                message = jobEntity.GetString("Message"),
-                processedStations = jobEntity.GetInt32("ProcessedStations"),
-                totalStations = jobEntity.GetInt32("TotalStations"),
+                status = jobEntity.GetString("status"),
+                createdAt = jobEntity.GetDateTime("createdAt"),
+                updatedAt = jobEntity.GetDateTime("updatedAt"),
                 images = imageUrls
             });
 
+            resp.AddCors();
             return resp;
         }
 

@@ -53,7 +53,6 @@ namespace WeatherImageApp.Functions
 
             var items = new List<object>();
 
-            // assuming PartitionKey = "Job" or similar – if in your current code you use something else, change it here
             await foreach (var entity in tableClient.QueryAsync<TableEntity>(maxPerPage: top))
             {
                 items.Add(new
