@@ -1,105 +1,75 @@
-<# 
-Deploys the WeatherImageApp:
- - Builds the .NET isolated Azure Functions app
- - Provisions Azure resources via Bicep
- - Sets app settings (optionally your public image API key)
- - Zip-deploys the package to the Function App
-
-Prereqs:
- az login
- az account set -s "<subscription id/name>"
- Azure Functions Core Tools NOT required (we use az zip deploy)
- .NET 8 SDK
-
-Usage:
- ./deploy.ps1 -ResourceGroup rg-weatherimg -Location westeurope `
-              -ProjectPath "./WeatherImageApp/WeatherImageApp.csproj" `
-              -BicepFile "./WeatherImageApp/bicep/main.bicep" `
-              -BaseName "weatherimg" `
-              -PublicImageApiBase "https://api.unsplash.com" `
-              -PublicImageApiKey "<YOUR_KEY>"
-#>
-
 param(
-  [Parameter(Mandatory=$true)]
-  [string]$ResourceGroup,
-
-  [Parameter(Mandatory=$true)]
-  [string]$Location,
-
-  [string]$ProjectPath = "./WeatherImageApp/WeatherImageApp.csproj",
-
-  [string]$BicepFile = "./WeatherImageApp/bicep/main.bicep",
-
-  [string]$BaseName = "weatherimg",
-
-  [string]$PublicImageApiBase = "",
-
-  [string]$PublicImageApiKey = ""
+    [string]$ResourceGroupName = "rg-weatherimg",
+    [string]$Location = "westeurope",
+    [string]$NamePrefix = "weatherimg"
 )
 
-$ErrorActionPreference = "Stop"
+# 1. Make sure you are logged in
+Write-Host "Checking Azure login..."
+az account show 1>$null 2>$null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "You are not logged in. Run 'az login' first." -ForegroundColor Red
+    exit 1
+}
 
-Write-Host "==> Creating/validating resource group '$ResourceGroup' in $Location..."
-az group create -n $ResourceGroup -l $Location | Out-Null
+# 2. Create resource group (idempotent)
+Write-Host "Creating / updating resource group $ResourceGroupName in $Location ..."
+az group create --name $ResourceGroupName --location $Location 1>$null
 
-# ---------- Build & package ----------
-$publishDir = Join-Path (Resolve-Path ".").Path "publish"
-if (Test-Path $publishDir) { Remove-Item $publishDir -Recurse -Force }
-dotnet publish $ProjectPath -c Release -o $publishDir
+# 3. Deploy bicep
+Write-Host "Deploying Bicep template..."
+$deploymentName = "weatherimg-deployment"
+az deployment group create `
+    --name $deploymentName `
+    --resource-group $ResourceGroupName `
+    --template-file ./main.bicep `
+    --parameters location=$Location namePrefix=$NamePrefix `
+    --output none
 
-# Create a zip for zip-deploy
-$zipPath = Join-Path $publishDir "app.zip"
-if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+# 4. Get function app name from deployment outputs
+Write-Host "Fetching function app name from deployment..."
+$funcName = az deployment group show `
+    --name $deploymentName `
+    --resource-group $ResourceGroupName `
+    --query "properties.outputs.functionAppName.value" `
+    -o tsv
+
+if (-not $funcName) {
+    Write-Host "Could not fetch function app name from deployment outputs." -ForegroundColor Red
+    exit 1
+}
+
+Write-Host "Function App: $funcName"
+
+# 5. Build / publish the function project
+Write-Host "Publishing .NET project..."
+# adjust path to your .csproj if needed
+dotnet publish ./WeatherImageApp.csproj -c Release -o ./publish
+
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "dotnet publish failed." -ForegroundColor Red
+    exit 1
+}
+
+# 6. Zip the publish folder
+Write-Host "Zipping publish output..."
+$zipPath = Join-Path (Get-Location) "publish.zip"
+if (Test-Path $zipPath) {
+    Remove-Item $zipPath
+}
 Add-Type -AssemblyName System.IO.Compression.FileSystem
-[System.IO.Compression.ZipFile]::CreateFromDirectory($publishDir, $zipPath)
+[System.IO.Compression.ZipFile]::CreateFromDirectory("./publish", $zipPath)
 
-# ---------- Provision with Bicep ----------
-Write-Host "==> Deploying Bicep template..."
-$deploymentName = "weatherimg-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-$deploy = az deployment group create `
-  -g $ResourceGroup `
-  -n $deploymentName `
-  --template-file $BicepFile `
-  --parameters baseName=$BaseName location=$Location publicImageApiBase=$PublicImageApiBase `
-  --query "properties.outputs" -o json | ConvertFrom-Json
-
-$functionAppName   = $deploy.functionAppName.value
-$storageAccount    = $deploy.storageAccountName.value
-$imagesContainerUrl = $deploy.imagesContainerUrl.value
-
-Write-Host "==> Provisioned:"
-Write-Host "    Function App: $functionAppName"
-Write-Host "    Storage     : $storageAccount"
-Write-Host "    Images URL  : $imagesContainerUrl"
-
-# ---------- Optional app settings (API key, etc.) ----------
-$settings = @()
-if ($PublicImageApiBase -and $PublicImageApiBase.Trim() -ne "") {
-  $settings += "PUBLIC_IMAGE_API_BASE=$PublicImageApiBase"
-}
-if ($PublicImageApiKey -and $PublicImageApiKey.Trim() -ne "") {
-  $settings += "PUBLIC_IMAGE_API_KEY=$PublicImageApiKey"
-}
-if ($settings.Count -gt 0) {
-  Write-Host "==> Setting additional app settings..."
-  az functionapp config appsettings set `
-    -g $ResourceGroup -n $functionAppName `
-    --settings $settings | Out-Null
-}
-
-# ---------- Zip deploy ----------
-Write-Host "==> Zip-deploying package..."
+# 7. Deploy zip to function app
+Write-Host "Deploying zip to Function App..."
 az functionapp deployment source config-zip `
-  -g $ResourceGroup -n $functionAppName `
-  --src $zipPath | Out-Null
+    --name $funcName `
+    --resource-group $ResourceGroupName `
+    --src $zipPath
 
-# ---------- Output helpful endpoints ----------
-$startUrl   = "https://$functionAppName.azurewebsites.net/api/start"
-$resultsUrl = "https://$functionAppName.azurewebsites.net/api/results/{jobId}"
-
-Write-Host ""
-Write-Host "✅ Deploy complete."
-Write-Host "Try the endpoints (adjust if your routes differ):"
-Write-Host "  POST $startUrl"
-Write-Host "  GET  $resultsUrl"
+if ($LASTEXITCODE -eq 0) {
+    Write-Host "Deployment finished successfully ✅" -ForegroundColor Green
+    Write-Host "Function App URL (root): https://$funcName.azurewebsites.net"
+} else {
+    Write-Host "Deployment failed." -ForegroundColor Red
+}

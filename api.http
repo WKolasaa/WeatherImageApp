@@ -31,3 +31,23 @@ GET {{baseUrl}}/api/GetJobStatus/{{jobId}}
 #   - Returns the list of image blobs generated for this jobId
 #   - Each item corresponds to one station (e.g. Meetstation_Goes.jpg)
 GET {{baseUrl}}/api/GetJobImages/{{jobId}}
+
+
+@host = http://localhost:7071
+@apiKey = YOUR_SECRET_KEY
+@jobId = REPLACE_ME
+
+### Start a new weather image job
+POST {{host}}/api/jobs/start
+x-api-key: {{apiKey}}
+Content-Type: application/json
+
+{}
+
+### Check job status
+GET {{host}}/api/jobs/{{jobId}}/status
+x-api-key: {{apiKey}}
+
+### List image URLs for this job
+GET {{host}}/api/jobs/{{jobId}}/images
+x-api-key: {{apiKey}}

@@ -1,108 +1,137 @@
 using System;
+using System.Collections.Generic;
 using System.Net;
+using System.Text.Json;
 using System.Threading.Tasks;
+using Azure;
+using Azure.Data.Tables;
+using Azure.Storage;
 using Azure.Storage.Blobs;
+using Azure.Storage.Sas;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Azure.Functions.Worker.Http;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 
 namespace WeatherImageApp.Functions
 {
     public class GetJobStatusFunction
     {
-        private readonly ILogger _logger;
-        private readonly BlobServiceClient _blobServiceClient;
+        private readonly IConfiguration _config;
+        private readonly ILogger<GetJobStatusFunction> _logger;
 
-        private const int ExpectedImagesPerJob = 36;
-
-        public GetJobStatusFunction(ILoggerFactory loggerFactory)
+        public GetJobStatusFunction(IConfiguration config, ILogger<GetJobStatusFunction> logger)
         {
-            _logger = loggerFactory.CreateLogger<GetJobStatusFunction>();
-
-            var storageConn = Environment.GetEnvironmentVariable("AzureWebJobsStorage");
-            _blobServiceClient = new BlobServiceClient(storageConn);
+            _config = config;
+            _logger = logger;
         }
 
+        // GET http://localhost:7071/api/jobs/{jobId}
         [Function("GetJobStatus")]
         public async Task<HttpResponseData> Run(
-            [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "jobs/{jobId}/status")]
+            [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "jobs/{jobId}")]
             HttpRequestData req,
             string jobId)
         {
+            var connString = _config["Storage:ConnectionString"] ?? _config["AzureWebJobsStorage"];
+            var tableName = _config["Storage:JobStatusTableName"] ?? "JobStatus";
+            var imagesContainer = _config["IMAGE_OUTPUT_CONTAINER"] ?? _config["Storage:ImagesContainerName"] ?? "images";
+            var sasExpiryMinutes = int.TryParse(_config["Api:SasExpiryMinutes"], out var mins) ? mins : 60;
+
             _logger.LogInformation("Getting status for job {JobId}", jobId);
 
-            var container = await FindContainerForJobAsync(jobId);
-            if (container == null)
+            // read from table
+            var tableClient = new TableClient(connString, tableName);
+            await tableClient.CreateIfNotExistsAsync();
+
+            // partition could be e.g. "jobs"
+            var entity = await tableClient.GetEntityAsync<TableEntity>("jobs", jobId);
+            var jobEntity = entity.Value;
+
+            // also count images already present for this job
+            var blobContainer = new BlobContainerClient(connString, imagesContainer);
+            await blobContainer.CreateIfNotExistsAsync();
+
+            var prefix = $"{jobId}/";
+            var imageUrls = new List<string>();
+
+            await foreach (var blobItem in blobContainer.GetBlobsAsync(prefix: prefix))
             {
-                var notFound = req.CreateResponse(HttpStatusCode.NotFound);
-                await notFound.WriteAsJsonAsync(new
-                {
-                    error = "container-not-found",
-                    message = "Could not find a blob container that contains this job's images.",
-                    jobId,
-                    expectedImages = ExpectedImagesPerJob
-                });
-                return notFound;
+                var sasUrl = BuildBlobSasUrl(blobContainer, blobItem.Name, connString, sasExpiryMinutes);
+                imageUrls.Add(sasUrl);
             }
 
-            var processed = 0;
-            await foreach (var _ in container.GetBlobsAsync(prefix: $"{jobId}/"))
-            {
-                processed++;
-            }
-
-            var percent = ExpectedImagesPerJob == 0
-                ? 100
-                : Math.Min(100, (int)Math.Round((double)processed / ExpectedImagesPerJob * 100));
-            var status = processed >= ExpectedImagesPerJob ? "Completed" : "InProgress";
-
-            var res = req.CreateResponse(HttpStatusCode.OK);
-            await res.WriteAsJsonAsync(new
+            var resp = req.CreateResponse(HttpStatusCode.OK);
+            await resp.WriteAsJsonAsync(new
             {
                 jobId,
-                status,
-                processedImages = processed,
-                expectedImages = ExpectedImagesPerJob,
-                percentComplete = percent,
-                container = container.Name,
-                imagesEndpoint = $"/api/jobs/{jobId}/images"
+                status = jobEntity.GetString("Status"),
+                message = jobEntity.GetString("Message"),
+                processedStations = jobEntity.GetInt32("ProcessedStations"),
+                totalStations = jobEntity.GetInt32("TotalStations"),
+                images = imageUrls
             });
-            return res;
+
+            return resp;
         }
 
-        private async Task<BlobContainerClient?> FindContainerForJobAsync(string jobId)
+        private static string BuildBlobSasUrl(
+            BlobContainerClient containerClient,
+            string blobName,
+            string connectionString,
+            int expiryMinutes)
         {
-            var overrideName = Environment.GetEnvironmentVariable("IMAGE_OUTPUT_CONTAINER");
-            if (!string.IsNullOrWhiteSpace(overrideName))
+            var (accountName, accountKey, blobEndpoint) = ParseStorageInfo(connectionString);
+
+            var credential = new StorageSharedKeyCredential(accountName, accountKey);
+
+            var sasBuilder = new BlobSasBuilder
             {
-                var candidate = _blobServiceClient.GetBlobContainerClient(overrideName);
-                if (await candidate.ExistsAsync())
-                    return candidate;
+                BlobContainerName = containerClient.Name,
+                BlobName = blobName,
+                Resource = "b",
+                ExpiresOn = DateTimeOffset.UtcNow.AddMinutes(expiryMinutes)
+            };
+            sasBuilder.SetPermissions(BlobSasPermissions.Read);
+
+            var sas = sasBuilder.ToSasQueryParameters(credential).ToString();
+
+            return $"{blobEndpoint}/{containerClient.Name}/{blobName}?{sas}";
+        }
+
+        private static (string accountName, string accountKey, string blobEndpoint) ParseStorageInfo(string connectionString)
+        {
+            if (string.Equals(connectionString, "UseDevelopmentStorage=true", StringComparison.OrdinalIgnoreCase))
+            {
+                const string devAccount = "devstoreaccount1";
+                const string devKey =
+                    "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==";
+                const string devBlobEndpoint = "http://127.0.0.1:10000/devstoreaccount1";
+                return (devAccount, devKey, devBlobEndpoint);
             }
 
-            var guesses = new[] { "output", "weather-images", "images" };
-            foreach (var name in guesses)
+            var parts = connectionString.Split(';', StringSplitOptions.RemoveEmptyEntries);
+            string? accountName = null;
+            string? accountKey = null;
+            string? blobEndpoint = null;
+
+            foreach (var part in parts)
             {
-                var candidate = _blobServiceClient.GetBlobContainerClient(name);
-                if (await candidate.ExistsAsync())
-                {
-                    await foreach (var _ in candidate.GetBlobsAsync(prefix: $"{jobId}/"))
-                    {
-                        return candidate;
-                    }
-                }
+                if (part.StartsWith("AccountName=", StringComparison.OrdinalIgnoreCase))
+                    accountName = part.Substring("AccountName=".Length);
+                else if (part.StartsWith("AccountKey=", StringComparison.OrdinalIgnoreCase))
+                    accountKey = part.Substring("AccountKey=".Length);
+                else if (part.StartsWith("BlobEndpoint=", StringComparison.OrdinalIgnoreCase))
+                    blobEndpoint = part.Substring("BlobEndpoint=".Length);
             }
 
-            await foreach (var containerItem in _blobServiceClient.GetBlobContainersAsync())
-            {
-                var candidate = _blobServiceClient.GetBlobContainerClient(containerItem.Name);
-                await foreach (var _ in candidate.GetBlobsAsync(prefix: $"{jobId}/"))
-                {
-                    return candidate;
-                }
-            }
+            if (string.IsNullOrEmpty(accountName) || string.IsNullOrEmpty(accountKey))
+                throw new InvalidOperationException("Storage connection string does not contain account name/key.");
 
-            return null;
+            if (string.IsNullOrEmpty(blobEndpoint))
+                blobEndpoint = $"https://{accountName}.blob.core.windows.net";
+
+            return (accountName, accountKey, blobEndpoint);
         }
     }
 }

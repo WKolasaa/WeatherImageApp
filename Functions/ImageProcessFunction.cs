@@ -1,130 +1,93 @@
 using System;
 using System.IO;
-using System.Net.Http;
 using System.Text.Json;
 using System.Threading.Tasks;
+using Azure;
+using Azure.Data.Tables;
 using Azure.Storage.Blobs;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Logging;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.PixelFormats;
-using SixLabors.ImageSharp.Processing;
-using SixLabors.ImageSharp.Drawing.Processing;
-using SixLabors.Fonts;
+using WeatherImageApp.Helpers;
+using WeatherImageApp.Models;
 
 namespace WeatherImageApp.Functions
 {
-    public sealed class ImageProcessFunction
+    public class ImageProcessFunction
     {
-        private readonly ILogger<ImageProcessFunction> _logger;
-        private readonly BlobServiceClient _blobSvc;
+        private readonly ILogger _logger;
+        private readonly string _storageConnection;
 
-        private static readonly HttpClient _http = new HttpClient();
-
-        public ImageProcessFunction(ILogger<ImageProcessFunction> logger, BlobServiceClient blobSvc)
+        public ImageProcessFunction(ILoggerFactory loggerFactory)
         {
-            _logger = logger;
-            _blobSvc = blobSvc;
+            _logger = loggerFactory.CreateLogger<ImageProcessFunction>();
+            _storageConnection = ConfigHelper.Get("AzureWebJobsStorage");
         }
 
         [Function("ImageProcessFunction")]
-        public async Task RunAsync(
-            [QueueTrigger("image-process3", Connection = "AzureWebJobsStorage")] string payload)
+        public async Task Run([QueueTrigger("%Storage:ImageQueueName%", Connection = "AzureWebJobsStorage")] string queueMessage)
         {
-            var json = JsonSerializer.Deserialize<JsonElement>(payload);
-            var jobId = json.TryGetProperty("jobId", out var jobIdProp)
-                ? jobIdProp.GetString() ?? "unknown"
-                : "unknown";
-            var station = json.TryGetProperty("station", out var stationProp)
-                ? stationProp.GetString() ?? "unknown"
-                : "unknown";
-            var temperature = json.TryGetProperty("temperature", out var tempProp)
-                ? tempProp.GetDouble()
-                : 0.0;
+            var doc = JsonDocument.Parse(queueMessage);
+            string jobId = doc.RootElement.GetProperty("JobId").GetString()!;
+            string stationName = doc.RootElement.GetProperty("StationName").GetString()!;
+            double? temperature = doc.RootElement.TryGetProperty("Temperature", out var t) && t.ValueKind == JsonValueKind.Number
+                ? t.GetDouble()
+                : (double?)null;
 
-            _logger.LogInformation("Generating image for {Station} ({Temp}°C)", station, temperature);
+            _logger.LogInformation("🖼️ Generating image for {Station} ({Temp}°C)", stationName, temperature);
+
+            byte[] imageBytes = await GetBaseImageBytesAsync();
+
+            var containerName = ConfigHelper.Get("Storage:ImagesContainerName",
+                                 ConfigHelper.Get("IMAGE_OUTPUT_CONTAINER", "images"));
+            var blobService = new BlobServiceClient(_storageConnection);
+            var container = blobService.GetBlobContainerClient(containerName);
+            await container.CreateIfNotExistsAsync();
+
+            var safeStation = stationName.Replace(' ', '_').Replace("/", "_").Replace("\\", "_");
+            var blobName = $"{jobId}/{safeStation}.jpg";
+            var blobClient = container.GetBlobClient(blobName);
+
+            using (var ms = new MemoryStream(imageBytes))
+            {
+                await blobClient.UploadAsync(ms, overwrite: true);
+            }
+
+            _logger.LogInformation("📦 Uploaded {BlobName}", blobName);
+
+            // update table
+            var tableName = ConfigHelper.Get("Storage:JobStatusTableName", "JobStatus");
+            var tableService = new TableServiceClient(_storageConnection);
+            var tableClient = tableService.GetTableClient(tableName);
+            await tableClient.CreateIfNotExistsAsync();
 
             try
             {
-                var imgBytes = await GetBaseImageBytesAsync(_logger);
+                var job = await tableClient.GetEntityAsync<JobStatusEntity>("jobs", jobId);
+                var entity = job.Value;
+                entity.ProcessedStations += 1;
+                entity.LastUpdatedUtc = DateTimeOffset.UtcNow;
 
-                using var image = Image.Load<Rgba32>(imgBytes);
-
-                image.Mutate(x =>
+                if (entity.TotalStations > 0 && entity.ProcessedStations >= entity.TotalStations)
                 {
-                    Font font;
-                        try
-                        {
-                            font = SystemFonts.CreateFont("Arial", 36);
-                        }
-                        catch (SixLabors.Fonts.FontFamilyNotFoundException)
-                        {
-                            font = SystemFonts.CreateFont("DejaVu Sans", 36);
-                        }
-                    var text = $"{station}: {temperature:F1}°C";
+                    entity.Status = "Completed";
+                }
 
-                    x.DrawText(text, font, Color.White, new PointF(20, 20));
-                });
-
-                using var ms = new MemoryStream();
-                await image.SaveAsJpegAsync(ms);
-                ms.Position = 0;
-
-                var container = _blobSvc.GetBlobContainerClient("images");
-                await container.CreateIfNotExistsAsync();
-
-                var safeStation = station.Replace(" ", "_");
-                var blobName = $"{jobId}/{safeStation}.jpg";
-                var blob = container.GetBlobClient(blobName);
-                await blob.UploadAsync(ms, overwrite: true);
-
-                _logger.LogInformation("Uploaded {BlobName}", blobName);
+                await tableClient.UpdateEntityAsync(entity, entity.ETag, TableUpdateMode.Replace);
             }
-            catch (Exception ex)
+            catch (RequestFailedException ex)
             {
-                _logger.LogError(ex, "Error generating image for station {Station}", station);
+                _logger.LogWarning(ex, "Could not update jobstatus for {JobId}", jobId);
             }
         }
 
-        private static async Task<byte[]> GetBaseImageBytesAsync(ILogger log)
+        private async Task<byte[]> GetBaseImageBytesAsync()
         {
-            try
+            var localPath = "/mnt/c/Users/wojtu/Desktop/Inholland/Year 4/WeatherImageApp/bin/output/assets/base-weather.jpg";
+            if (File.Exists(localPath))
             {
-                var unsplashUrl = "https://source.unsplash.com/random/800x600/?landscape,weather";
-                var bytes = await _http.GetByteArrayAsync(unsplashUrl);
-                log.LogInformation("Got base image from Unsplash");
-                return bytes;
+                return await File.ReadAllBytesAsync(localPath);
             }
-            catch (Exception ex)
-            {
-                log.LogWarning(ex, "Unsplash unavailable. Falling back to local asset.");
-            }
-
-            try
-            {
-                var baseDir = Environment.CurrentDirectory;
-                var assetPath = Path.Combine(baseDir, "assets", "base-weather.jpg");
-
-                if (File.Exists(assetPath))
-                {
-                    log.LogInformation("Using local asset image at {Path}", assetPath);
-                    return await File.ReadAllBytesAsync(assetPath);
-                }
-                else
-                {
-                    log.LogWarning("Local asset image not found at {Path}. Will generate a solid image.", assetPath);
-                }
-            }
-            catch (Exception ex)
-            {
-                log.LogWarning(ex, "Error reading local asset image. Will generate a solid image.");
-            }
-
-            using var fallbackImage = new Image<Rgba32>(800, 600);
-            fallbackImage.Mutate(x => x.Fill(Color.SteelBlue));
-            using var ms = new MemoryStream();
-            await fallbackImage.SaveAsJpegAsync(ms);
-            return ms.ToArray();
+            return Array.Empty<byte>();
         }
     }
 }

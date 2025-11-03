@@ -1,69 +1,78 @@
-@description('Base name used to generate unique resource names.')
-param baseName string = 'weatherimg'
-
-@description('Azure location for all resources.')
+@description('Azure region to deploy to')
 param location string = resourceGroup().location
 
-@description('Name of the blob container that stores generated images.')
-param imagesContainerName string = 'images'
+@description('Prefix for naming resources')
+param namePrefix string = 'weatherimg'
 
-@description('Starter queue name (fan-in). Must match your code.')
-param starterQueueName string = 'weather-jobs'
+var storageAccountName = 'st${uniqueString(resourceGroup().id)}'
+var functionAppName    = '${namePrefix}-func'
+var hostingPlanName    = '${namePrefix}-plan'
+var appInsightsName    = '${namePrefix}-ai'
 
-@description('Per-image processing queue name. Must match your code.')
-param workerQueueName string = 'image-process3'
-
-@description('Optional: public image API base URL (e.g., https://api.unsplash.com)')
-@allowed([
-  ''
-])
-param publicImageApiBase string = ''
-
-@description('Optional: set to true to enable system-assigned managed identity on the Function App.')
-param enableManagedIdentity bool = true
-
-// ----------------- Naming helpers -----------------
-var suffix = uniqueString(resourceGroup().id, baseName)
-var storageName = toLower(replace('${baseName}${suffix}', '-', ''))
-var planName = 'plan-${baseName}-${suffix}'
-var functionAppName = 'func-${baseName}-${suffix}'
-
-// ----------------- Storage Account -----------------
-resource sa 'Microsoft.Storage/storageAccounts@2023-01-01' = {
-  name: storageName
+// --- STORAGE ACCOUNT ---
+resource storage 'Microsoft.Storage/storageAccounts@2023-01-01' = {
+  name: storageAccountName
   location: location
   sku: {
     name: 'Standard_LRS'
   }
   kind: 'StorageV2'
   properties: {
-    allowBlobPublicAccess: true
+    accessTier: 'Hot'
     minimumTlsVersion: 'TLS1_2'
     supportsHttpsTrafficOnly: true
   }
 }
 
-// Blob container
-resource blobContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-01-01' = {
-  name: '${sa.name}/default/${imagesContainerName}'
+// --- BLOBS: containers ---
+resource imagesContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-01-01' = {
+  name: '${storage.name}/default/images'
   properties: {
-    // Set to 'Blob' for public anonymous read of blobs (or 'None' if you will use SAS).
-    publicAccess: 'Blob'
+    publicAccess: 'None'
   }
 }
 
-// Queues
-resource starterQueue 'Microsoft.Storage/storageAccounts/queueServices/queues@2023-01-01' = {
-  name: '${sa.name}/default/${starterQueueName}'
+resource outputContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-01-01' = {
+  name: '${storage.name}/default/output'
+  properties: {
+    publicAccess: 'None'
+  }
 }
 
-resource workerQueue 'Microsoft.Storage/storageAccounts/queueServices/queues@2023-01-01' = {
-  name: '${sa.name}/default/${workerQueueName}'
+// --- QUEUES ---
+resource startJobsQueue 'Microsoft.Storage/storageAccounts/queueServices/queues@2023-01-01' = {
+  name: '${storage.name}/default/start-jobs'
 }
 
-// ----------------- App Service Plan (Consumption) -----------------
-resource plan 'Microsoft.Web/serverfarms@2023-12-01' = {
-  name: planName
+resource imageJobsQueue 'Microsoft.Storage/storageAccounts/queueServices/queues@2023-01-01' = {
+  name: '${storage.name}/default/image-jobs'
+}
+
+// --- TABLE for job status ---
+resource tableService 'Microsoft.Storage/storageAccounts/tableServices@2023-01-01' = {
+  name: '${storage.name}/default'
+}
+
+resource jobStatusTable 'Microsoft.Storage/storageAccounts/tableServices/tables@2023-01-01' = {
+  name: '${storage.name}/default/JobStatus'
+  dependsOn: [
+    tableService
+  ]
+}
+
+// --- APP INSIGHTS ---
+resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
+  name: appInsightsName
+  location: location
+  kind: 'web'
+  properties: {
+    Application_Type: 'web'
+  }
+}
+
+// --- CONSUMPTION PLAN (Functions) ---
+resource hostingPlan 'Microsoft.Web/serverfarms@2023-12-01' = {
+  name: hostingPlanName
   location: location
   sku: {
     name: 'Y1'
@@ -72,92 +81,98 @@ resource plan 'Microsoft.Web/serverfarms@2023-12-01' = {
   kind: 'functionapp'
 }
 
-// ----------------- Function App -----------------
-resource func 'Microsoft.Web/sites@2023-12-01' = {
+// we need the storage connection string for app settings
+var storageKey = listKeys(storage.name, storage.apiVersion).keys[0].value
+var storageConnectionString = 'DefaultEndpointsProtocol=https;AccountName=${storage.name};AccountKey=${storageKey};EndpointSuffix=${environment().suffixes.storage}'
+
+// --- FUNCTION APP ---
+resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
   name: functionAppName
   location: location
-  kind: 'functionapp'
+  kind: 'functionapp,linux'
   properties: {
-    serverFarmId: plan.id
+    serverFarmId: hostingPlan.id
     httpsOnly: true
     siteConfig: {
+      linuxFxVersion: 'DOTNET-ISOLATED|8.0'
       appSettings: [
-        // Required by Functions
         {
-          name: 'FUNCTIONS_EXTENSION_VERSION'
-          value: '~4'
+          name: 'AzureWebJobsStorage'
+          value: storageConnectionString
         }
         {
           name: 'FUNCTIONS_WORKER_RUNTIME'
           value: 'dotnet-isolated'
         }
-        // Storage connection used by Functions runtime + your Queue/Blob bindings
-        {
-          name: 'AzureWebJobsStorage'
-          value: 'DefaultEndpointsProtocol=https;AccountName=${sa.name};AccountKey=${listKeys(sa.id, ''2023-01-01'').keys[0].value};EndpointSuffix=${environment().suffixes.storage}'
-        }
-        // Zip deploy: run from package
         {
           name: 'WEBSITE_RUN_FROM_PACKAGE'
           value: '1'
         }
-        // App-specific settings (adjust to match your code)
         {
-          name: 'IMAGES_CONTAINER_NAME'
-          value: imagesContainerName
+          name: 'APPINSIGHTS_INSTRUMENTATIONKEY'
+          value: appInsights.properties.InstrumentationKey
+        }
+        // your custom settings mirrored from local.settings.json
+        {
+          name: 'Storage:ConnectionString'
+          value: storageConnectionString
         }
         {
-          name: 'STARTER_QUEUE_NAME'
-          value: starterQueueName
+          name: 'Storage:ImagesContainerName'
+          value: 'images'
         }
         {
-          name: 'WORKER_QUEUE_NAME'
-          value: workerQueueName
+          name: 'Storage:StartQueueName'
+          value: 'start-jobs'
         }
         {
-          name: 'BUIENRADAR_URL'
+          name: 'Storage:ImageQueueName'
+          value: 'image-jobs'
+        }
+        {
+          name: 'Storage:JobStatusTableName'
+          value: 'JobStatus'
+        }
+        {
+          name: 'Api:BuienradarUrl'
           value: 'https://data.buienradar.nl/2.0/feed/json'
         }
-        // If you use a public image API (e.g., Unsplash). Keep key empty here; set via deploy script or portal.
         {
-          name: 'PUBLIC_IMAGE_API_BASE'
-          value: publicImageApiBase
+          name: 'Api:UnsplashQuery'
+          value: 'weather'
         }
         {
-          name: 'PUBLIC_IMAGE_API_KEY'
+          name: 'Api:SasExpiryMinutes'
+          value: '60'
+        }
+        {
+          name: 'Api:StationsToProcess'
+          value: '50'
+        }
+        {
+          name: 'Api:ImageApiUrl'
+          value: 'https://picsum.photos/600/400'
+        }
+        {
+          name: 'Api:UnsplashApiKey'
           value: ''
         }
+        {
+          name: 'IMAGE_OUTPUT_CONTAINER'
+          value: 'output'
+        }
       ]
-      // .NET isolated doesn’t need a stack config here.
-      http20Enabled: true
-      alwaysOn: false
-      ftpsState: 'Disabled'
     }
   }
-  identity: enableManagedIdentity ? {
+  identity: {
     type: 'SystemAssigned'
-  } : null
-  dependsOn: [
-    sa
-    starterQueue
-    workerQueue
-    blobContainer
-    plan
-  ]
+  }
+  tags: {
+    'project': namePrefix
+  }
 }
 
-// ----------------- Outputs -----------------
-@description('Function App name.')
-output functionAppName string = func.name
-
-@description('Storage Account name.')
-output storageAccountName string = sa.name
-
-@description('Images container URL.')
-output imagesContainerUrl string = 'https://${sa.name}.blob.${environment().suffixes.storage}/$imagesContainerName'
-
-@description('Suggested start endpoint (adjust if your route differs).')
-output exampleStartUrl string = 'https://${func.name}.azurewebsites.net/api/start'
-
-@description('Suggested results endpoint (adjust if your route differs).')
-output exampleResultsUrl string = 'https://${func.name}.azurewebsites.net/api/results/{jobId}'
+output functionAppName string = functionApp.name
+output storageAccountName string = storage.name
+output imagesContainerName string = imagesContainer.name
+output outputContainerName string = outputContainer.name

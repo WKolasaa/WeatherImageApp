@@ -17,6 +17,6 @@
     "Api:ImageApiUrl": "https://picsum.photos/600/400",
     "Api:UnsplashApiKey": "",
 
-    "IMAGE_OUTPUT_CONTAINER": "output"
+    "IMAGE_OUTPUT_CONTAINER": "images"
   }
 }
