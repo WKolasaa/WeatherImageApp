@@ -1,15 +1,16 @@
 using System;
 using System.IO;
+using System.Net.Http;
 using System.Text.Json;
 using System.Threading.Tasks;
 using Azure.Storage.Blobs;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Logging;
-using SixLabors.Fonts;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 using SixLabors.ImageSharp.Processing;
 using SixLabors.ImageSharp.Drawing.Processing;
+using SixLabors.Fonts;
 
 namespace WeatherImageApp.Functions
 {
@@ -17,6 +18,9 @@ namespace WeatherImageApp.Functions
     {
         private readonly ILogger<ImageProcessFunction> _logger;
         private readonly BlobServiceClient _blobSvc;
+
+        // reuse 1 HttpClient for functions
+        private static readonly HttpClient _http = new HttpClient();
 
         public ImageProcessFunction(ILogger<ImageProcessFunction> logger, BlobServiceClient blobSvc)
         {
@@ -43,23 +47,36 @@ namespace WeatherImageApp.Functions
 
             try
             {
-                // 1. load background from assets
-                using Image<Rgba32> image = LoadBackgroundImage();
+                // 1. get base image bytes (public API -> asset -> generated)
+                var imgBytes = await GetBaseImageBytesAsync(_logger);
 
-                // 2. draw text
-                var font = LoadFont(36f);
-                var text = $"{station}: {temperature:F1}°C";
+                // 2. load into ImageSharp
+                using var image = Image.Load<Rgba32>(imgBytes);
 
+                // 3. draw text
                 image.Mutate(x =>
                 {
+                    Font font;
+                        try
+                        {
+                            font = SystemFonts.CreateFont("Arial", 36);
+                        }
+                        catch (SixLabors.Fonts.FontFamilyNotFoundException)
+                        {
+                            // fallback for Linux
+                            font = SystemFonts.CreateFont("DejaVu Sans", 36);
+                        }
+                    var text = $"{station}: {temperature:F1}°C";
+
                     x.DrawText(text, font, Color.White, new PointF(20, 20));
                 });
 
-                // 3. save to blob
+                // 4. save to stream
                 using var ms = new MemoryStream();
                 await image.SaveAsJpegAsync(ms);
                 ms.Position = 0;
 
+                // 5. upload to blob
                 var container = _blobSvc.GetBlobContainerClient("images");
                 await container.CreateIfNotExistsAsync();
 
@@ -76,41 +93,54 @@ namespace WeatherImageApp.Functions
             }
         }
 
-        private static Image<Rgba32> LoadBackgroundImage()
+        /// <summary>
+        /// Tries, in order:
+        /// 1) Unsplash public API
+        /// 2) local assets/base-weather.jpg
+        /// 3) generated blue image
+        /// </summary>
+        private static async Task<byte[]> GetBaseImageBytesAsync(ILogger log)
         {
-            // look in bin/.../assets/
-            var bgPath = Path.Combine(AppContext.BaseDirectory, "assets", "weather-bg.jpg");
-
-            if (File.Exists(bgPath))
+            // 1) try public image API (to satisfy assignment)
+            try
             {
-                return Image.Load<Rgba32>(bgPath);
+                var unsplashUrl = "https://source.unsplash.com/random/800x600/?landscape,weather";
+                var bytes = await _http.GetByteArrayAsync(unsplashUrl);
+                log.LogInformation("🌄 Got base image from Unsplash");
+                return bytes;
+            }
+            catch (Exception ex)
+            {
+                log.LogWarning(ex, "Unsplash unavailable. Falling back to local asset.");
             }
 
-            // fallback: make simple blue image
-            var img = new Image<Rgba32>(800, 600);
-            img.Mutate(x => x.Fill(Color.SteelBlue));
-            return img;
-        }
-
-        private static Font LoadFont(float size = 36f)
-        {
-            // 1. try asset font
-            var fontPath = Path.Combine(AppContext.BaseDirectory, "assets", "OpenSans-Regular.ttf");
-            if (File.Exists(fontPath))
+            // 2) try local asset
+            try
             {
-                var collection = new FontCollection();
-                var family = collection.Add(fontPath);
-                return family.CreateFont(size);
+                var baseDir = Environment.CurrentDirectory;
+                var assetPath = Path.Combine(baseDir, "assets", "base-weather.jpg");
+
+                if (File.Exists(assetPath))
+                {
+                    log.LogInformation("🗂️ Using local asset image at {Path}", assetPath);
+                    return await File.ReadAllBytesAsync(assetPath);
+                }
+                else
+                {
+                    log.LogWarning("Local asset image not found at {Path}. Will generate a solid image.", assetPath);
+                }
+            }
+            catch (Exception ex)
+            {
+                log.LogWarning(ex, "Error reading local asset image. Will generate a solid image.");
             }
 
-            // 2. fallback to any system font
-            var families = SystemFonts.Collection.Families.ToArray();
-            if (families.Length == 0)
-            {
-                throw new Exception("No fonts available (asset not found and no system fonts).");
-            }
-
-            return families[0].CreateFont(size);
+            // 3) final fallback: generate solid image
+            using var fallbackImage = new Image<Rgba32>(800, 600);
+            fallbackImage.Mutate(x => x.Fill(Color.SteelBlue));
+            using var ms = new MemoryStream();
+            await fallbackImage.SaveAsJpegAsync(ms);
+            return ms.ToArray();
         }
     }
 }
