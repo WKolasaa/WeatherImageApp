@@ -9,7 +9,7 @@ var functionAppName    = '${namePrefix}-func'
 var hostingPlanName    = '${namePrefix}-plan'
 var appInsightsName    = '${namePrefix}-ai'
 
-// --- STORAGE ACCOUNT ---
+// ========== STORAGE ACCOUNT ==========
 resource storage 'Microsoft.Storage/storageAccounts@2023-01-01' = {
   name: storageAccountName
   location: location
@@ -24,7 +24,7 @@ resource storage 'Microsoft.Storage/storageAccounts@2023-01-01' = {
   }
 }
 
-// --- BLOBS: containers ---
+// ========== BLOBS ==========
 resource imagesContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-01-01' = {
   name: '${storage.name}/default/images'
   properties: {
@@ -39,7 +39,7 @@ resource outputContainer 'Microsoft.Storage/storageAccounts/blobServices/contain
   }
 }
 
-// --- QUEUES ---
+// ========== QUEUES ==========
 resource startJobsQueue 'Microsoft.Storage/storageAccounts/queueServices/queues@2023-01-01' = {
   name: '${storage.name}/default/start-jobs'
 }
@@ -48,7 +48,7 @@ resource imageJobsQueue 'Microsoft.Storage/storageAccounts/queueServices/queues@
   name: '${storage.name}/default/image-jobs'
 }
 
-// --- TABLE for job status ---
+// ========== TABLES ==========
 resource tableService 'Microsoft.Storage/storageAccounts/tableServices@2023-01-01' = {
   name: '${storage.name}/default'
 }
@@ -60,7 +60,7 @@ resource jobStatusTable 'Microsoft.Storage/storageAccounts/tableServices/tables@
   ]
 }
 
-// --- APP INSIGHTS ---
+// ========== APP INSIGHTS ==========
 resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
   name: appInsightsName
   location: location
@@ -70,7 +70,7 @@ resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
   }
 }
 
-// --- CONSUMPTION PLAN (Functions) ---
+// ========== CONSUMPTION PLAN (Windows Functions) ==========
 resource hostingPlan 'Microsoft.Web/serverfarms@2023-12-01' = {
   name: hostingPlanName
   location: location
@@ -81,20 +81,18 @@ resource hostingPlan 'Microsoft.Web/serverfarms@2023-12-01' = {
   kind: 'functionapp'
 }
 
-// we need the storage connection string for app settings
 var storageKey = listKeys(storage.name, storage.apiVersion).keys[0].value
 var storageConnectionString = 'DefaultEndpointsProtocol=https;AccountName=${storage.name};AccountKey=${storageKey};EndpointSuffix=${environment().suffixes.storage}'
 
-// --- FUNCTION APP ---
+// ========== FUNCTION APP (Windows, dotnet-isolated) ==========
 resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
   name: functionAppName
   location: location
-  kind: 'functionapp,linux'
+  kind: 'functionapp'
   properties: {
     serverFarmId: hostingPlan.id
     httpsOnly: true
     siteConfig: {
-      linuxFxVersion: 'DOTNET-ISOLATED|8.0'
       appSettings: [
         {
           name: 'AzureWebJobsStorage'
@@ -112,7 +110,7 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
           name: 'APPINSIGHTS_INSTRUMENTATIONKEY'
           value: appInsights.properties.InstrumentationKey
         }
-        // your custom settings mirrored from local.settings.json
+
         {
           name: 'Storage:ConnectionString'
           value: storageConnectionString
@@ -159,7 +157,11 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         }
         {
           name: 'IMAGE_OUTPUT_CONTAINER'
-          value: 'output'
+          value: 'images'
+        }
+        {
+          name: 'WEBSITE_USE_PLACEHOLDER_DOTNETISOLATED'
+          value: '1'
         }
       ]
     }
@@ -168,7 +170,7 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
     type: 'SystemAssigned'
   }
   tags: {
-    'project': namePrefix
+    project: namePrefix
   }
 }
 

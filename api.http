@@ -1,53 +1,41 @@
-@baseUrl = http://localhost:7071
-# Replace this with the jobId returned from "Start job"
-@jobId = 21564a2e-b0d5-4f5b-9131-1b17a844af8f
+@host = https://weatherimageapp-win-gdhah5b9graacuh8.polandcentral-01.azurewebsites.net
 
 ###
-# 1) START A NEW WEATHER IMAGE JOB
-# Description:
-#   - Triggers the function that calls Buienradar
-#   - Queues a job on "weather-jobs"
-# Response:
-#   - 202 / 200 with JSON containing the jobId
-POST {{baseUrl}}/api/StartJobFunction
-Content-Type: application/json
-
-{
-  "source": "buienradar"
-}
+# 1) Health check
+GET {{host}}/api/health
+Accept: application/json
 
 ###
-# 2) GET JOB STATUS
-# Description:
-#   - Poll this to see if all station images have been generated
-#   - The function looks in the blob container for blobs under the jobId folder
-# Notes:
-#   - Make sure the storage container exists in your local Azurite/Azure storage
-GET {{baseUrl}}/api/GetJobStatus/{{jobId}}
-
-###
-# 3) LIST / FETCH JOB IMAGES
-# Description:
-#   - Returns the list of image blobs generated for this jobId
-#   - Each item corresponds to one station (e.g. Meetstation_Goes.jpg)
-GET {{baseUrl}}/api/GetJobImages/{{jobId}}
-
-
-@host = http://localhost:7071
-@apiKey = YOUR_SECRET_KEY
-@jobId = REPLACE_ME
-
-### Start a new weather image job
+# 2) Start a new job
+# response is named so it can be reused as the jobId below
+# @name startJob
 POST {{host}}/api/jobs/start
-x-api-key: {{apiKey}}
 Content-Type: application/json
 
 {}
 
-### Check job status
-GET {{host}}/api/jobs/{{jobId}}/status
-x-api-key: {{apiKey}}
+###
+# 3) Get status for the job just started
+# This uses the jobId from the response above
+GET {{host}}/api/jobs/{{startJob.response.body.$.jobId}}
+Accept: application/json
 
-### List image URLs for this job
-GET {{host}}/api/jobs/{{jobId}}/images
-x-api-key: {{apiKey}}
+###
+# 4) Get images for the started job 
+GET {{host}}/api/jobs/{{startJob.response.body.$.jobId}}/images
+Accept: application/json
+
+###
+# 5) List all jobs
+GET {{host}}/api/jobs
+Accept: application/json
+
+###
+# 6) Get results (legacy / optional) for the job  just started
+GET {{host}}/api/results/{{startJob.response.body.$.jobId}}
+Accept: application/json
+
+###
+# 7) Debug queues (may only work locally or if exposed)
+GET {{host}}/api/debug/queues
+Accept: application/json
