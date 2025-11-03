@@ -27,28 +27,42 @@ jobs:
           zip -r ../app.zip .
           cd ..
 
-      - name: Deploy via Kudu zip-to-folder
+      - name: Deploy via Kudu (python parse)
         env:
           PUBLISH_PROFILE: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
         run: |
-          # write secret to file
-          echo "$PUBLISH_PROFILE" > pp.xml
+          python - << 'PY'
+          import os, xml.etree.ElementTree as ET, subprocess, sys
 
-          # extract from xml
-          USERNAME=$(xmllint --xpath "string(//publishProfile/@userName)" pp.xml)
-          PASSWORD=$(xmllint --xpath "string(//publishProfile/@userPWD)" pp.xml)
-          PUBLISH_URL=$(xmllint --xpath "string(//publishProfile/@publishUrl)" pp.xml)
+          xml_text = os.environ["PUBLISH_PROFILE"]
+          root = ET.fromstring(xml_text)
 
-          # publishUrl usually looks like: myfunc.scm.azurewebsites.net:443
-          # we need just the host part
-          HOST=${PUBLISH_URL%%:*}
+          # pick the MSDeploy publish profile (has the scm url + creds)
+          pp = None
+          for n in root.findall(".//publishProfile"):
+              if n.get("publishMethod") in ("MSDeploy", "ZipDeploy", "Kudu"):
+                  pp = n
+                  break
+          if pp is None:
+              print("No suitable publishProfile found", file=sys.stderr)
+              sys.exit(1)
 
-          # final Kudu endpoint that always exists
-          DEPLOY_URL="https://${HOST}/api/zip/site/wwwroot"
+          username = pp.get("userName")
+          password = pp.get("userPWD")
+          publish_url = pp.get("publishUrl")  # e.g. weatherimageapp.scm.azurewebsites.net:443
 
-          echo "Deploying to $DEPLOY_URL"
+          host = publish_url.split(":", 1)[0]
+          deploy_url = f"https://{host}/api/zip/site/wwwroot"
 
-          curl -X PUT "$DEPLOY_URL" \
-            -u "$USERNAME:$PASSWORD" \
-            --data-binary @app.zip \
-            -H "Content-Type: application/zip"
+          print(f"Deploying to {deploy_url}")
+
+          # call curl to upload app.zip
+          res = subprocess.run([
+              "curl", "-X", "PUT", deploy_url,
+              "-u", f"{username}:{password}",
+              "--data-binary", "@app.zip",
+              "-H", "Content-Type: application/zip"
+          ])
+
+          sys.exit(res.returncode)
+          PY
