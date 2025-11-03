@@ -1,4 +1,3 @@
-// Functions/StartJobFunction.cs
 using System;
 using System.Net;
 using System.Text;
@@ -29,9 +28,8 @@ public async Task<HttpResponseData> RunAsync([HttpTrigger(AuthorizationLevel.Adm
     await weatherQ.CreateIfNotExistsAsync();
     _logger.LogInformation("Queue ready: {QueueUri}", weatherQ.Uri);
 
-    // Send Base64 encoded message like the other queues
     await weatherQ.SendMessageAsync(Convert.ToBase64String(Encoding.UTF8.GetBytes(jobId)));
-    _logger.LogInformation("✅ Job {JobId} queued to weather-jobs.", jobId);
+    _logger.LogInformation("Job {JobId} queued to weather-jobs.", jobId);
 
     var res = req.CreateResponse(HttpStatusCode.OK);
     await res.WriteStringAsync(jobId);

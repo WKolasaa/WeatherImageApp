@@ -1,4 +1,3 @@
-// Functions/ProcessWeatherStationFunction.cs
 using System;
 using System.Net.Http;
 using System.Text;
@@ -24,7 +23,7 @@ namespace WeatherImageApp.Functions
         [Function("ProcessWeatherStationFunction")]
         public async Task RunAsync([QueueTrigger("weather-jobs", Connection = "AzureWebJobsStorage")] string jobId)
         {
-            _logger.LogInformation("🌦️ FUNCTION STARTED - Processing weather data for job {JobId}...", jobId);
+            _logger.LogInformation("FUNCTION STARTED - Processing weather data for job {JobId}...", jobId);
 
             try
             {
@@ -41,7 +40,7 @@ namespace WeatherImageApp.Functions
                 if (!doc.RootElement.TryGetProperty("actual", out var actual) ||
                     !actual.TryGetProperty("stationmeasurements", out var stations))
                 {
-                    _logger.LogWarning("⚠️ Buienradar response missing 'actual.stationmeasurements'");
+                    _logger.LogWarning("Buienradar response missing 'actual.stationmeasurements'");
                     return;
                 }
 
@@ -74,11 +73,11 @@ namespace WeatherImageApp.Functions
                     _logger.LogInformation("Queued image job #{Count} for {Station}", count, name);
                 }
                 
-                _logger.LogInformation("✅ FUNCTION COMPLETED - Queued {Count} stations", count);
+                _logger.LogInformation("FUNCTION COMPLETED - Queued {Count} stations", count);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "❌ Error processing weather data for job {JobId}", jobId);
+                _logger.LogError(ex, "Error processing weather data for job {JobId}", jobId);
                 throw; // Re-throw to see the actual error
             }
         }

@@ -1,5 +1,33 @@
-### Start job
-POST http://localhost:7071/api/StartJobFunction
+@baseUrl = http://localhost:7071
+# Replace this with the jobId returned from "Start job"
+@jobId = 21564a2e-b0d5-4f5b-9131-1b17a844af8f
 
-### Get results
-GET http://localhost:7071/api/results/{jobId}
+###
+# 1) START A NEW WEATHER IMAGE JOB
+# Description:
+#   - Triggers the function that calls Buienradar
+#   - Queues a job on "weather-jobs"
+# Response:
+#   - 202 / 200 with JSON containing the jobId
+POST {{baseUrl}}/api/StartJobFunction
+Content-Type: application/json
+
+{
+  "source": "buienradar"
+}
+
+###
+# 2) GET JOB STATUS
+# Description:
+#   - Poll this to see if all station images have been generated
+#   - The function looks in the blob container for blobs under the jobId folder
+# Notes:
+#   - Make sure the storage container exists in your local Azurite/Azure storage
+GET {{baseUrl}}/api/GetJobStatus/{{jobId}}
+
+###
+# 3) LIST / FETCH JOB IMAGES
+# Description:
+#   - Returns the list of image blobs generated for this jobId
+#   - Each item corresponds to one station (e.g. Meetstation_Goes.jpg)
+GET {{baseUrl}}/api/GetJobImages/{{jobId}}
