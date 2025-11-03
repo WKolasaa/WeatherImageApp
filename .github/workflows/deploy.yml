@@ -1,4 +1,4 @@
-name: Deploy Azure Function (direct Kudu)
+name: Deploy Azure Function
 
 on:
   push:
@@ -21,48 +21,11 @@ jobs:
       - name: Publish project
         run: dotnet publish ./WeatherImageApp.csproj -c Release -o ./publish
 
-      - name: Archive publish
-        run: |
-          cd publish
-          zip -r ../app.zip .
-          cd ..
-
-      - name: Deploy via Kudu (python parse)
-        env:
-          PUBLISH_PROFILE: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
-        run: |
-          python - << 'PY'
-          import os, xml.etree.ElementTree as ET, subprocess, sys
-
-          xml_text = os.environ["PUBLISH_PROFILE"]
-          root = ET.fromstring(xml_text)
-
-          # pick the MSDeploy publish profile (has the scm url + creds)
-          pp = None
-          for n in root.findall(".//publishProfile"):
-              if n.get("publishMethod") in ("MSDeploy", "ZipDeploy", "Kudu"):
-                  pp = n
-                  break
-          if pp is None:
-              print("No suitable publishProfile found", file=sys.stderr)
-              sys.exit(1)
-
-          username = pp.get("userName")
-          password = pp.get("userPWD")
-          publish_url = pp.get("publishUrl")  # e.g. weatherimageapp.scm.azurewebsites.net:443
-
-          host = publish_url.split(":", 1)[0]
-          deploy_url = f"https://{host}/api/zip/site/wwwroot"
-
-          print(f"Deploying to {deploy_url}")
-
-          # call curl to upload app.zip
-          res = subprocess.run([
-              "curl", "-X", "PUT", deploy_url,
-              "-u", f"{username}:{password}",
-              "--data-binary", "@app.zip",
-              "-H", "Content-Type: application/zip"
-          ])
-
-          sys.exit(res.returncode)
-          PY
+      - name: Deploy to Azure
+        uses: azure/functions-action@v1
+        with:
+          app-name: weatherimageapp-win
+          package: ./publish
+          publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
+          scm-do-build-during-deployment: false
+          enable-oryx-build: false
