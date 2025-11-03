@@ -1,4 +1,4 @@
-name: Deploy Azure Function
+name: Deploy Azure Function (direct Kudu)
 
 on:
   push:
@@ -16,20 +16,39 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-            dotnet-version: '8.0.x'
+          dotnet-version: '8.0.x'
 
-      - name: Restore
-        run: dotnet restore ./WeatherImageApp.csproj
+      - name: Publish project
+        run: dotnet publish ./WeatherImageApp.csproj -c Release -o ./publish
 
-      - name: Build
-        run: dotnet build ./WeatherImageApp.csproj --configuration Release --no-restore
+      - name: Archive publish
+        run: |
+          cd publish
+          zip -r ../app.zip .
+          cd ..
 
-      - name: Publish
-        run: dotnet publish ./WeatherImageApp.csproj --configuration Release --output ./publish
+      - name: Deploy via Kudu zip-to-folder
+        env:
+          PUBLISH_PROFILE: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
+        run: |
+          # write secret to file
+          echo "$PUBLISH_PROFILE" > pp.xml
 
-      - name: Deploy to Azure Function App
-        uses: azure/functions-action@v1
-        with:
-          app-name: weatherimageapp
-          package: ./publish
-          publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
+          # extract from xml
+          USERNAME=$(xmllint --xpath "string(//publishProfile/@userName)" pp.xml)
+          PASSWORD=$(xmllint --xpath "string(//publishProfile/@userPWD)" pp.xml)
+          PUBLISH_URL=$(xmllint --xpath "string(//publishProfile/@publishUrl)" pp.xml)
+
+          # publishUrl usually looks like: myfunc.scm.azurewebsites.net:443
+          # we need just the host part
+          HOST=${PUBLISH_URL%%:*}
+
+          # final Kudu endpoint that always exists
+          DEPLOY_URL="https://${HOST}/api/zip/site/wwwroot"
+
+          echo "Deploying to $DEPLOY_URL"
+
+          curl -X PUT "$DEPLOY_URL" \
+            -u "$USERNAME:$PASSWORD" \
+            --data-binary @app.zip \
+            -H "Content-Type: application/zip"
