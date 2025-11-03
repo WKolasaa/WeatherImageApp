@@ -1,0 +1,5 @@
+### Start job
+POST http://localhost:7071/api/StartJobFunction
+
+### Get results
+GET http://localhost:7071/api/results/{jobId}
