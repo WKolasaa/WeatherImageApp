@@ -9,6 +9,11 @@ using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Logging;
 using WeatherImageApp.Helpers;
 using WeatherImageApp.Models;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Processing;
+using SixLabors.ImageSharp.Drawing.Processing;
+using SixLabors.ImageSharp.Formats.Jpeg;
+using SixLabors.Fonts;
 
 namespace WeatherImageApp.Functions
 {
@@ -65,8 +70,39 @@ namespace WeatherImageApp.Functions
             byte[] imageBytes = await GetBaseImageBytesAsync();
             if (imageBytes.Length == 0)
             {
-                imageBytes = new byte[] { 0x00 };
+                _logger.LogWarning("Base image not found at ./assets/base-weather.jpg");
+                return;
             }
+
+            using var image = Image.Load(imageBytes);
+
+            var fontPath = Path.Combine(Environment.CurrentDirectory, "assets", "OpenSens-Regular.ttf");
+            Font font;
+            if (File.Exists(fontPath))
+            {
+                var collection = new FontCollection();
+                var family = collection.Add(fontPath);
+                font = family.CreateFont(36, FontStyle.Bold);
+            }
+            else
+            {
+                _logger.LogWarning("Font file not found at {FontPath}; text may not render.", fontPath);
+                var collection = new FontCollection();
+                font = SystemFonts.CreateFont("Arial", 36); 
+            }
+
+            var text = temperature.HasValue
+                ? $"{stationName}: {temperature.Value:F1}°C"
+                : stationName;
+
+            image.Mutate(ctx =>
+            {
+                ctx.DrawText(
+                    text,
+                    font,
+                    SixLabors.ImageSharp.Color.White,
+                    new PointF(20, 40));
+            });
 
             var blobService = new BlobServiceClient(_storageConnection);
             var container = blobService.GetBlobContainerClient(_imagesContainer);
@@ -80,9 +116,11 @@ namespace WeatherImageApp.Functions
             var blobName = $"{jobId}/{safeStation}.jpg";
             var blobClient = container.GetBlobClient(blobName);
 
-            using (var ms = new MemoryStream(imageBytes))
+            using (var outStream = new MemoryStream())
             {
-                await blobClient.UploadAsync(ms, overwrite: true);
+                await image.SaveAsync(outStream, new JpegEncoder());
+                outStream.Position = 0;
+                await blobClient.UploadAsync(outStream, overwrite: true);
             }
 
             _logger.LogInformation("Uploaded blob {BlobName} to container {Container}",
@@ -161,8 +199,7 @@ namespace WeatherImageApp.Functions
 
         private async Task<byte[]> GetBaseImageBytesAsync()
         {
-            var localPath =
-                "./assets/base-weather.jpg";
+            var localPath = "./assets/base-weather.jpg";
 
             if (File.Exists(localPath))
             {
